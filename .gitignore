@@ -1,0 +1,28 @@
+elf
+
+__pycache__
+
+
+# Unity generated files
+turret-sim/[Ll]ibrary/
+turret-sim/[Tt]emp/
+turret-sim/[Oo]bj/
+turret-sim/[Bb]uild/
+turret-sim/[Bb]uilds/
+turret-sim/[Ll]ogs/
+turret-sim/[Uu]ser[Ss]ettings/
+turret-sim/[Mm]emoryCaptures/
+
+# Asset meta data
+turret-sim/*.pidb.meta
+
+# Unity3D generated file on crash reports
+turret-sim/sysinfo.txt
+
+# Builds
+turret-sim/*.apk
+turret-sim/*.aab
+turret-sim/*.unitypackage
+
+# Crashlytics generated file
+turret-sim/crashlytics-build.properties

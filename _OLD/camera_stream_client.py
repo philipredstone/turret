@@ -17,7 +17,7 @@ class CameraStreamClient:
         self.last_frame_time = 0
         self.fps = 0
         self.last_frame_update = 0
-        self.debug = True  # Enable debug output
+        self.debug = False  # Enable debug output
         self.frame_hash = None  # Track frame content changes
        
     def connect(self, host='127.0.0.1', port=8080):

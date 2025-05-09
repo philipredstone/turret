@@ -30,6 +30,7 @@ public class SimpleTurretController : MonoBehaviour
     [SerializeField] private float laserMaxDistance = 100f;
     [SerializeField] private bool invertLaserDirection = true;
     [SerializeField] private bool hideBeamKeepDot = false;
+    [SerializeField] private LayerMask laserLayerMask = ~0; // Default to everything
 
     [Header("Network Settings")]
     [SerializeField] private int networkPort = 8888;
@@ -42,6 +43,9 @@ public class SimpleTurretController : MonoBehaviour
     // Components
     private LineRenderer lineRenderer;
     private GameObject dotInstance;
+
+    // Track if laser is currently active (not just enabled)
+    private bool laserActive = false;
 
     // TCP server variables
     private TcpListener tcpListener;
@@ -94,6 +98,31 @@ public class SimpleTurretController : MonoBehaviour
 
         dotInstance = Instantiate(laserDot);
         dotInstance.SetActive(false);
+
+        // Create a special layer for the laser dot to avoid self-collision
+        if (dotInstance.layer == 0) // Default layer
+        {
+            // Try to find or create a "LaserDot" layer
+            int laserDotLayer = LayerMask.NameToLayer("LaserDot");
+            if (laserDotLayer == -1)
+            {
+                Debug.LogWarning("LaserDot layer not found in project. Laser dot may cause raycast self-collision issues. Consider adding a LaserDot layer.");
+            }
+            else
+            {
+                dotInstance.layer = laserDotLayer;
+                // Update the layer mask to ignore this layer
+                laserLayerMask = ~(1 << laserDotLayer);
+            }
+        }
+
+        // Make absolutely sure the collider is destroyed
+        Collider dotCollider = dotInstance.GetComponent<Collider>();
+        if (dotCollider != null)
+        {
+            Destroy(dotCollider);
+            Debug.Log("Removed collider from laser dot instance");
+        }
     }
 
     private void Start()
@@ -144,6 +173,12 @@ public class SimpleTurretController : MonoBehaviour
 
         // Handle keyboard input
         HandleInput();
+
+        // Update laser position continuously if it's active
+        if (laserActive && laserEnabled)
+        {
+            UpdateLaserPosition();
+        }
 
         // Debug: Press F5 to fire
         if (Input.GetKeyDown(KeyCode.F5))
@@ -217,6 +252,61 @@ public class SimpleTurretController : MonoBehaviour
         Debug.Log($"Set turret rotation: yaw={targetYaw}, pitch={targetPitch}");
     }
 
+    // New method to update the laser position without "firing" again
+    private void UpdateLaserPosition()
+    {
+        if (!laserEnabled || (barrelPivot == null && (!useCustomLaserOrigin || customLaserOrigin == null)))
+        {
+            return;
+        }
+
+        // Get firing position and direction
+        Vector3 firePos;
+        Vector3 fireDir;
+
+        if (useCustomLaserOrigin && customLaserOrigin != null)
+        {
+            // Use custom transform
+            firePos = customLaserOrigin.position;
+            fireDir = invertLaserDirection ? -customLaserOrigin.forward : customLaserOrigin.forward;
+        }
+        else
+        {
+            // Use default barrel pivot
+            firePos = barrelPivot.position;
+            fireDir = invertLaserDirection ? -barrelPivot.forward : barrelPivot.forward;
+        }
+
+        // Perform raycast with layer mask to ignore the laser dot
+        RaycastHit hit;
+        bool didHit = Physics.Raycast(firePos, fireDir, out hit, laserMaxDistance, laserLayerMask);
+
+        // Calculate end position
+        Vector3 hitPos = didHit ? hit.point : firePos + fireDir * laserMaxDistance;
+
+        // Update visual laser without the logging
+        if (lineRenderer != null && !hideBeamKeepDot)
+        {
+            lineRenderer.enabled = true;
+            lineRenderer.SetPosition(0, firePos);
+            lineRenderer.SetPosition(1, hitPos);
+        }
+
+        // Update dot position (always shown when laser is active)
+        if (dotInstance != null)
+        {
+            dotInstance.SetActive(true);
+            dotInstance.transform.position = hitPos;
+
+            // Ensure the dot doesn't affect future raycasts
+            Collider dotCollider = dotInstance.GetComponent<Collider>();
+            if (dotCollider != null)
+            {
+                Destroy(dotCollider);
+            }
+        }
+    }
+
     public void FireLaser()
     {
         if (!laserEnabled || (barrelPivot == null && (!useCustomLaserOrigin || customLaserOrigin == null)))
@@ -227,10 +317,13 @@ public class SimpleTurretController : MonoBehaviour
 
         Debug.Log("Firing laser");
 
+        // Set laser active flag to true
+        laserActive = true;
+
         // Get firing position and direction
         Vector3 firePos;
         Vector3 fireDir;
-        
+
         if (useCustomLaserOrigin && customLaserOrigin != null)
         {
             // Use custom transform
@@ -248,9 +341,9 @@ public class SimpleTurretController : MonoBehaviour
         // Draw debug ray to verify direction
         Debug.DrawRay(firePos, fireDir * 10f, Color.yellow, 1.0f);
 
-        // Perform raycast
+        // Perform raycast with layer mask to ignore the laser dot
         RaycastHit hit;
-        bool didHit = Physics.Raycast(firePos, fireDir, out hit, laserMaxDistance);
+        bool didHit = Physics.Raycast(firePos, fireDir, out hit, laserMaxDistance, laserLayerMask);
 
         // Calculate end position
         Vector3 hitPos = didHit ? hit.point : firePos + fireDir * laserMaxDistance;
@@ -285,21 +378,8 @@ public class SimpleTurretController : MonoBehaviour
             dotInstance.transform.position = endPos;
         }
 
-        // Start coroutine to disable laser after delay
-        // StartCoroutine(HideLaserAfterDelay(0.5f));
-    }
-
-    private IEnumerator HideLaserAfterDelay(float delay)
-    {
-        yield return new WaitForSeconds(delay);
-
-        // Always hide the line renderer after delay
-        if (lineRenderer != null)
-            lineRenderer.enabled = false;
-
-        // Always hide the dot after delay
-        if (dotInstance != null)
-            dotInstance.SetActive(false);
+        // Note: We no longer hide the laser after delay
+        // It will stay on until explicitly turned off
     }
 
     public void SetLaserEnabled(bool enabled)
@@ -309,6 +389,9 @@ public class SimpleTurretController : MonoBehaviour
 
         if (!enabled)
         {
+            // Turn off the active state when disabling
+            laserActive = false;
+
             if (lineRenderer != null)
                 lineRenderer.enabled = false;
 
@@ -316,19 +399,19 @@ public class SimpleTurretController : MonoBehaviour
                 dotInstance.SetActive(false);
         }
     }
-    
+
     public void SetHideBeamKeepDot(bool hide)
     {
         hideBeamKeepDot = hide;
         Debug.Log($"Hide beam, keep dot: {hide}");
-        
+
         // If we're hiding the beam immediately, disable the line renderer
         if (hide && lineRenderer != null)
         {
             lineRenderer.enabled = false;
         }
     }
-    
+
     // Set custom laser origin transform
     public void SetCustomLaserOrigin(Transform newOrigin, bool useIt = true)
     {
@@ -475,7 +558,7 @@ public class SimpleTurretController : MonoBehaviour
                 case "SETORIGIN":
                     ProcessSetOriginCommand(param, stream);
                     break;
-                    
+
                 case "HIDEBEAM":
                     ProcessHideBeamCommand(param, stream);
                     break;
@@ -498,13 +581,17 @@ public class SimpleTurretController : MonoBehaviour
         {
             EnqueueOnMainThread(() => {
                 SetLaserEnabled(true);
-                FireLaser();
+                laserActive = true;  // Ensure laser stays active
+                FireLaser();  // Initial fire to position the laser
             });
             SendResponse(stream, "LASER:ON");
         }
         else if (param == "OFF")
         {
-            EnqueueOnMainThread(() => SetLaserEnabled(false));
+            EnqueueOnMainThread(() => {
+                laserActive = false;  // Turn off active state
+                SetLaserEnabled(false);
+            });
             SendResponse(stream, "LASER:OFF");
         }
         else
@@ -576,17 +663,17 @@ public class SimpleTurretController : MonoBehaviour
             SendResponse(stream, $"ERROR:{e.Message}");
         }
     }
-    
+
     private void ProcessHideBeamCommand(string param, NetworkStream stream)
     {
         try
         {
             bool hideBeam = bool.Parse(param);
-            
+
             EnqueueOnMainThread(() => {
                 SetHideBeamKeepDot(hideBeam);
             });
-            
+
             SendResponse(stream, $"HIDEBEAM:{hideBeam}");
         }
         catch (FormatException)

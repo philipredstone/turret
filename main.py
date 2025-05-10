@@ -403,6 +403,40 @@ class SimplifiedTurretCalibrationApp(QMainWindow):
         # Set focus policy to accept keyboard input
         self.setFocusPolicy(Qt.StrongFocus)
     
+    def _map_label_click_to_image_coords(self, click_pos):
+        """Maps a click position on the camera_view_label to image coordinates."""
+        label_widget = self.camera_view_label
+        label_size = label_widget.size()
+        
+        current_pixmap = label_widget.pixmap()
+        if not current_pixmap or current_pixmap.isNull():
+            self.log_message("Debug: _map_label_click_to_image_coords - No pixmap in label.")
+            return None # No pixmap
+            
+        pixmap_size = current_pixmap.size() # Original image size
+        
+        if pixmap_size.width() == 0 or pixmap_size.height() == 0:
+            self.log_message(f"Debug: _map_label_click_to_image_coords - Invalid pixmap size: {pixmap_size.width()}x{pixmap_size.height()}")
+            return None # Invalid pixmap size
+
+        # Calculate the offset of the pixmap within the label (due to Qt.AlignCenter)
+        # QLabel displays the pixmap at its native size, centered.
+        offset_x = (label_size.width() - pixmap_size.width()) / 2.0
+        offset_y = (label_size.height() - pixmap_size.height()) / 2.0
+
+        # Convert click coordinates from label space to pixmap space
+        img_x_float = click_pos.x() - offset_x
+        img_y_float = click_pos.y() - offset_y
+
+        # Check if the click is within the actual bounds of the (potentially smaller or larger) pixmap
+        # as mapped from the label.
+        if 0 <= img_x_float < pixmap_size.width() and \
+           0 <= img_y_float < pixmap_size.height():
+            return int(img_x_float), int(img_y_float)
+        else:
+            self.log_message(f"Debug: Click ({click_pos.x()},{click_pos.y()}) mapped to ({img_x_float:.1f},{img_y_float:.1f}) is outside pixmap ({pixmap_size.width()},{pixmap_size.height()})")
+            return None # Click was outside the image area on the label
+    
     def init_ui(self):
         # Main window settings
         self.setWindowTitle("Turret Calibration with WASD Controls")
@@ -694,74 +728,64 @@ class SimplifiedTurretCalibrationApp(QMainWindow):
     
     def on_image_clicked(self, event):
         """Handle clicks on the camera image"""
+        
+        image_coords = self._map_label_click_to_image_coords(event.pos())
+        
+        if image_coords is None:
+            self.log_message("Click was outside the image area or image not available.")
+            return
+
+        img_x, img_y = image_coords
+
         if self.targeting_mode and self.calibration.is_calibrated:
-            # Get click position
-            pos = event.pos()
-            
-            # Convert to image coordinates
-            label_size = self.camera_view_label.size()
-            pixmap_size = self.camera_view_label.pixmap().size()
-            
-            # Scale coordinates if image is resized
-            if pixmap_size.width() > 0 and pixmap_size.height() > 0:
-                x_ratio = pixmap_size.width() / label_size.width()
-                y_ratio = pixmap_size.height() / label_size.height()
-                
-                img_x = pos.x() * x_ratio
-                img_y = pos.y() * y_ratio
-                
-                # Aim turret at clicked position
-                self.calibration.aim_at_target(img_x, img_y)
-                self.log_message(f"Aiming at ({int(img_x)}, {int(img_y)})")
+            self.calibration.aim_at_target(img_x, img_y)
+            self.log_message(f"Aiming at ({img_x}, {img_y})")
             return
             
-        if self.calibration_mode != "CORNER_SELECTED" and self.calibration_mode != "DETECTED":
-            if hasattr(self, 'corners') and self.corners is not None:
-                self.calibration_mode = "DETECTED"  # Allow capturing even without selecting a corner
-            else:
-                self.log_message("Please detect checkerboard first")
-                return
+        # This part is for manual laser marking / calibration point capture
+        can_proceed_with_marking = False
+        if self.calibration_mode in ["CORNER_SELECTED", "DETECTED"]:
+            can_proceed_with_marking = True
+        elif hasattr(self, 'corners') and self.corners is not None:
+            # Mode is not ideal (e.g. IDLE), but corners are detected.
+            # Allow proceeding by switching mode.
+            self.calibration_mode = "DETECTED" 
+            self.log_message(f"Switched to DETECTED mode as corners are present for manual marking.")
+            can_proceed_with_marking = True
+
+        if not can_proceed_with_marking:
+            self.log_message("Manual marking: Please detect checkerboard first, or select a corner if already detected.")
+            return
         
-        # Get click position
-        pos = event.pos()
+        # Store manual laser position using the correctly mapped coordinates
+        self.manual_laser_pos = (img_x, img_y) # img_x, img_y are already int
         
-        # Convert to image coordinates
-        label_size = self.camera_view_label.size()
-        pixmap_size = self.camera_view_label.pixmap().size()
+        # Auto-select nearest corner logic (uses img_x, img_y from the image)
+        if self.selected_corner_idx == -1 and hasattr(self, 'corners') and self.corners is not None:
+            nearest_idx = -1
+            min_dist = float('inf')
+            
+            # self.corners stores image coordinates (x,y)
+            for i, (corner_img_x, corner_img_y) in enumerate(self.corners):
+                dist = ((corner_img_x - img_x) ** 2 + (corner_img_y - img_y) ** 2) ** 0.5
+                if dist < min_dist:
+                    min_dist = dist
+                    nearest_idx = i
+            
+            # Threshold for auto-selection, e.g., 50 pixels on the image
+            if min_dist < 50: 
+                self.selected_corner_idx = nearest_idx
+                # Ensure combo box update is safe
+                if nearest_idx + 1 < self.corner_combo.count():
+                    self.corner_combo.setCurrentIndex(nearest_idx + 1) # +1 for "None" entry
+                else:
+                    self.log_message(f"Warning: nearest_idx+1 {nearest_idx+1} out of bounds for corner_combo (count {self.corner_combo.count()})")
+
+                self.log_message(f"Auto-selected nearest corner {nearest_idx} to click at ({img_x},{img_y})")
         
-        # Scale coordinates if image is resized
-        if pixmap_size.width() > 0 and pixmap_size.height() > 0:
-            x_ratio = pixmap_size.width() / label_size.width()
-            y_ratio = pixmap_size.height() / label_size.height()
-            
-            img_x = pos.x() * x_ratio
-            img_y = pos.y() * y_ratio
-            
-            # Store manual laser position
-            self.manual_laser_pos = (int(img_x), int(img_y))
-            
-            # If no corner is selected but we have corners detected, find the nearest corner
-            if self.selected_corner_idx == -1 and hasattr(self, 'corners') and self.corners is not None:
-                nearest_idx = -1
-                min_dist = float('inf')
-                
-                for i, (x, y) in enumerate(self.corners):
-                    dist = ((x - img_x) ** 2 + (y - img_y) ** 2) ** 0.5
-                    if dist < min_dist:
-                        min_dist = dist
-                        nearest_idx = i
-                
-                if min_dist < 50:  # Only select if relatively close
-                    self.selected_corner_idx = nearest_idx
-                    self.corner_combo.setCurrentIndex(nearest_idx + 1)
-                    self.log_message(f"Auto-selected nearest corner {nearest_idx}")
-            
-            self.laser_pos_label.setText(f"Position: ({int(img_x)}, {int(img_y)})")
-            
-            # Enable capture button
-            self.capture_point_btn.setEnabled(True)
-            
-            self.log_message(f"Laser position marked at ({int(img_x)}, {int(img_y)})")
+        self.laser_pos_label.setText(f"Position: ({img_x}, {img_y})")
+        self.capture_point_btn.setEnabled(True)
+        self.log_message(f"Laser position marked at ({img_x}, {img_y})")
     
     def keyPressEvent(self, event):
         """Handle key press events for WASD control"""

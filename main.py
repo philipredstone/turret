@@ -14,7 +14,7 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QPushButton, QLabel,
                             QGroupBox, QComboBox, QSpinBox, QDoubleSpinBox, QLineEdit, 
                             QTextEdit, QMessageBox, QSplitter, QStatusBar, QFileDialog,
                             QSlider, QCheckBox, QTabWidget, QDockWidget)
-from PyQt5.QtGui import QImage, QPixmap, QFont, QKeyEvent
+from PyQt5.QtGui import QImage, QPixmap, QFont, QKeyEvent, QIcon
 from PyQt5.QtCore import Qt, QTimer, QMutex, pyqtSignal
 
 
@@ -25,6 +25,7 @@ from ui import SimplifiedTurretCalibrationApp
 
 def main():
     app = QApplication(sys.argv)
+    app.setWindowIcon(QIcon('logo.png'))
     
     # Initialize clients
     camera_client = CameraStreamClient()

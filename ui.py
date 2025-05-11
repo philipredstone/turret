@@ -13,8 +13,9 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QPushButton, QLabel,
                             QVBoxLayout, QHBoxLayout, QGridLayout, QWidget, 
                             QGroupBox, QComboBox, QSpinBox, QDoubleSpinBox, QLineEdit, 
                             QTextEdit, QMessageBox, QSplitter, QStatusBar, QFileDialog,
-                            QSlider, QCheckBox, QTabWidget, QDockWidget)
-from PyQt5.QtGui import QImage, QPixmap, QFont, QKeyEvent
+                            QSlider, QCheckBox, QTabWidget, QDockWidget, QMenuBar,
+                            QMenu, QAction, QDialog, QDialogButtonBox)
+from PyQt5.QtGui import QImage, QPixmap, QFont, QKeyEvent, QIcon
 from PyQt5.QtCore import Qt, QTimer, QMutex, pyqtSignal
 
 from clickable_label import ClickableLabel
@@ -22,171 +23,17 @@ from calibration import TurretCalibration
 from automatic_calibrator import AutomaticCalibrator
 
 
-class SimplifiedTurretCalibrationApp(QMainWindow):
-    def __init__(self, camera_client, turret_client):
-        super().__init__()
+class ConnectionSettingsDialog(QDialog):
+    """Dialog for camera and turret connection settings"""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Connection Settings")
+        self.setModal(True)
+        self.setMinimumWidth(400)
+        self.setWindowIcon(QIcon('logo.png'))
         
-        # Store clients
-        self.camera = camera_client
-        self.turret = turret_client
-        
-        # Create calibration system
-        self.calibration = TurretCalibration(self.camera, self.turret)
-        
-        # Create automatic calibrator
-        self.auto_calibrator = AutomaticCalibrator(
-            camera_client, 
-            turret_client, 
-            self.calibration
-        )
-        
-        # Set debug visualization callback
-        # self.auto_calibrator.set_debug_visualization_callback(self.show_debug_visualization)
-        
-        # Setup variables
-        self.laser_on = False
-        self.selected_corner_idx = -1
-        self.corners = None
-        self.current_frame = None
-        self.calibration_mode = "IDLE"  # IDLE, DETECTED, CORNER_SELECTED, CALIBRATED
-        self.current_yaw = 0
-        self.current_pitch = 0
-        self.manual_laser_pos = None
-        self.wasd_step_size = 0.005  # Step size for WASD movement
-        self.targeting_mode = False  # Flag for click-to-target mode
-        self.show_debug_windows = False
-        
-        # Setup UI
-        self.init_ui()
-        
-        # Timer for updating camera feed
-        self.camera_timer = QTimer(self)
-        self.camera_timer.timeout.connect(self.update_camera_feed)
-        self.camera_timer.start(50)  # 20 fps update rate
-        
-        # Timer for status updates
-        self.status_timer = QTimer(self)
-        self.status_timer.timeout.connect(self.update_status)
-        self.status_timer.start(1000)  # Update every second
-        
-        # Set focus policy to accept keyboard input
-        self.setFocusPolicy(Qt.StrongFocus)
-    
-    def show_debug_visualization(self, frame, debug_info):
-        """Display debug visualization windows"""
-        if not self.show_debug_windows:
-            return
-        
-        # Show different masks and detection stages
-        if 'red_mask' in debug_info and debug_info['red_mask'] is not None:
-            cv2.imshow("Red Mask", debug_info['red_mask'])
-        
-        if 'red_dominant' in debug_info and debug_info['red_dominant'] is not None:
-            cv2.imshow("Red Dominant", debug_info['red_dominant'])
-        
-        if 'combined_mask' in debug_info and debug_info['combined_mask'] is not None:
-            cv2.imshow("Combined Mask", debug_info['combined_mask'])
-        
-        if 'final_mask1' in debug_info and debug_info['final_mask1'] is not None:
-            cv2.imshow("Final Mask (with brightness)", debug_info['final_mask1'])
-        
-        if 'final_mask2' in debug_info and debug_info['final_mask2'] is not None:
-            cv2.imshow("Final Mask (without brightness)", debug_info['final_mask2'])
-        
-        # Show detection result
-        if frame is not None:
-            result_frame = frame.copy()
-            
-            # Draw all contours
-            if 'contours1' in debug_info:
-                cv2.drawContours(result_frame, debug_info['contours1'], -1, (0, 255, 0), 1)
-            if 'contours2' in debug_info:
-                cv2.drawContours(result_frame, debug_info['contours2'], -1, (0, 255, 255), 1)
-            
-            # Draw best contour
-            if 'best_contour' in debug_info and debug_info['best_contour'] is not None:
-                cv2.drawContours(result_frame, [debug_info['best_contour']], -1, (255, 0, 0), 2)
-            
-            # Draw detected laser position
-            if 'laser_pos' in debug_info and debug_info['laser_pos'] is not None:
-                pos = debug_info['laser_pos']
-                cv2.circle(result_frame, pos, 10, (0, 0, 255), 2)
-                cv2.putText(result_frame, f"Laser: {pos}", (pos[0]+15, pos[1]), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
-            
-            cv2.imshow("Detection Result", result_frame)
-    
-    def _map_label_click_to_image_coords(self, click_pos):
-        """Maps a click position on the camera_view_label to image coordinates."""
-        label_widget = self.camera_view_label
-        label_size = label_widget.size()
-        
-        current_pixmap = label_widget.pixmap()
-        if not current_pixmap or current_pixmap.isNull():
-            self.log_message("Debug: _map_label_click_to_image_coords - No pixmap in label.")
-            return None # No pixmap
-            
-        pixmap_size = current_pixmap.size() # Original image size
-        
-        if pixmap_size.width() == 0 or pixmap_size.height() == 0:
-            self.log_message(f"Debug: _map_label_click_to_image_coords - Invalid pixmap size: {pixmap_size.width()}x{pixmap_size.height()}")
-            return None # Invalid pixmap size
-
-        # Calculate the offset of the pixmap within the label (due to Qt.AlignCenter)
-        offset_x = (label_size.width() - pixmap_size.width()) / 2.0
-        offset_y = (label_size.height() - pixmap_size.height()) / 2.0
-
-        # Convert click coordinates from label space to pixmap space
-        img_x_float = click_pos.x() - offset_x
-        img_y_float = click_pos.y() - offset_y
-
-        # Check if the click is within the actual bounds of the pixmap
-        if 0 <= img_x_float < pixmap_size.width() and \
-           0 <= img_y_float < pixmap_size.height():
-            return int(img_x_float), int(img_y_float)
-        else:
-            self.log_message(f"Debug: Click ({click_pos.x()},{click_pos.y()}) mapped to ({img_x_float:.1f},{img_y_float:.1f}) is outside pixmap ({pixmap_size.width()},{pixmap_size.height()})")
-            return None
-    
-    def init_ui(self):
-        # Main window settings
-        self.setWindowTitle("Turret Calibration with Automatic Calibration")
-        self.setGeometry(100, 100, 1200, 800)
-        
-        # Create central widget and layout
-        central_widget = QWidget()
-        main_layout = QHBoxLayout()
-        central_widget.setLayout(main_layout)
-        self.setCentralWidget(central_widget)
-        
-        # Left side - Camera view
-        camera_frame = QWidget()
-        camera_layout = QVBoxLayout()
-        camera_frame.setLayout(camera_layout)
-        
-        # Camera view label with click event
-        self.camera_view_label = ClickableLabel("Camera feed loading...")
-        self.camera_view_label.clicked.connect(self.on_image_clicked)
-        self.camera_view_label.setAlignment(Qt.AlignCenter)
-        self.camera_view_label.setMinimumSize(800, 600)
-        self.camera_view_label.setFont(QFont("Arial", 14))
-        camera_layout.addWidget(self.camera_view_label)
-        
-        # Resolution and status label
-        self.resolution_label = QLabel("Resolution: - | Use WASD to move turret (Click for targeting when calibrated)")
-        self.resolution_label.setFont(QFont("Arial", 10))
-        camera_layout.addWidget(self.resolution_label)
-        
-        main_layout.addWidget(camera_frame, 3)  # 3:1 ratio for camera to controls
-        
-        # Right side - Tabbed Controls
-        control_tabs = QTabWidget()
-        control_tabs.setMaximumWidth(400)  # Limit width of control panel
-        
-        # Tab 1: Connection
-        connection_tab = QWidget()
-        connection_layout = QVBoxLayout()
-        connection_tab.setLayout(connection_layout)
+        # Create layout
+        layout = QVBoxLayout()
         
         # Connection group
         connection_group = QGroupBox("Connection Settings")
@@ -220,15 +67,430 @@ class SimplifiedTurretCalibrationApp(QMainWindow):
         self.turret_port_spin.setValue(8888)
         connection_grid_layout.addWidget(self.turret_port_spin, 3, 1)
         
-        # Connect button
-        self.reconnect_btn = QPushButton("Reconnect")
-        self.reconnect_btn.clicked.connect(self.reconnect)
-        connection_grid_layout.addWidget(self.reconnect_btn, 4, 0, 1, 2)
+        layout.addWidget(connection_group)
         
-        connection_layout.addWidget(connection_group)
-        connection_layout.addStretch()
+        # Buttons
+        button_box = QDialogButtonBox(
+            QDialogButtonBox.Ok | QDialogButtonBox.Cancel,
+            parent=self
+        )
+        self.reconnect_btn = QPushButton("Reconnect Now")
+        button_box.addButton(self.reconnect_btn, QDialogButtonBox.ActionRole)
         
-        # Tab 2: Manual Control
+        button_box.accepted.connect(self.accept)
+        button_box.rejected.connect(self.reject)
+        
+        layout.addWidget(button_box)
+        self.setLayout(layout)
+    
+    def get_settings(self):
+        """Return the current settings"""
+        return {
+            'camera_host': self.camera_host_edit.text(),
+            'camera_port': self.camera_port_spin.value(),
+            'turret_host': self.turret_host_edit.text(),
+            'turret_port': self.turret_port_spin.value()
+        }
+    
+    def set_settings(self, settings):
+        """Set the dialog values from settings"""
+        self.camera_host_edit.setText(settings['camera_host'])
+        self.camera_port_spin.setValue(settings['camera_port'])
+        self.turret_host_edit.setText(settings['turret_host'])
+        self.turret_port_spin.setValue(settings['turret_port'])
+
+
+class AdvancedSettingsDialog(QDialog):
+    """Dialog for advanced laser detection settings"""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Advanced Settings")
+        self.setModal(True)
+        self.setMinimumWidth(400)
+        self.setWindowIcon(QIcon('logo.png'))
+        
+        # Create layout
+        layout = QVBoxLayout()
+        
+        # Laser Detection Settings group
+        detection_group = QGroupBox("Laser Detection Settings")
+        detection_group.setFont(QFont("Arial", 12, QFont.Bold))
+        detection_layout = QVBoxLayout()
+        detection_group.setLayout(detection_layout)
+        
+        # Add adjustable parameters
+        param_layout = QGridLayout()
+        
+        # Red multiplier
+        param_layout.addWidget(QLabel("Red Dominance:"), 0, 0)
+        self.red_multiplier_spin = QDoubleSpinBox()
+        self.red_multiplier_spin.setRange(1.0, 2.0)
+        self.red_multiplier_spin.setValue(1.3)
+        self.red_multiplier_spin.setSingleStep(0.1)
+        param_layout.addWidget(self.red_multiplier_spin, 0, 1)
+        
+        # Red threshold
+        param_layout.addWidget(QLabel("Red Threshold:"), 1, 0)
+        self.red_threshold_spin = QSpinBox()
+        self.red_threshold_spin.setRange(0, 255)
+        self.red_threshold_spin.setValue(100)
+        param_layout.addWidget(self.red_threshold_spin, 1, 1)
+        
+        # Min area
+        param_layout.addWidget(QLabel("Min Area:"), 2, 0)
+        self.min_area_spin = QSpinBox()
+        self.min_area_spin.setRange(1, 1000)
+        self.min_area_spin.setValue(5)
+        param_layout.addWidget(self.min_area_spin, 2, 1)
+        
+        # Circularity threshold
+        param_layout.addWidget(QLabel("Circularity:"), 3, 0)
+        self.circularity_spin = QDoubleSpinBox()
+        self.circularity_spin.setRange(0.0, 1.0)
+        self.circularity_spin.setValue(0.3)
+        self.circularity_spin.setSingleStep(0.1)
+        param_layout.addWidget(self.circularity_spin, 3, 1)
+        
+        detection_layout.addLayout(param_layout)
+        
+        # Debug visualization checkbox
+        self.debug_viz_checkbox = QCheckBox("Show Debug Windows")
+        detection_layout.addWidget(self.debug_viz_checkbox)
+        
+        # Test laser detection button
+        self.test_laser_detection_btn = QPushButton("Test Laser Detection")
+        detection_layout.addWidget(self.test_laser_detection_btn)
+        
+        layout.addWidget(detection_group)
+        
+        # Buttons
+        button_box = QDialogButtonBox(
+            QDialogButtonBox.Ok | QDialogButtonBox.Cancel,
+            parent=self
+        )
+        button_box.accepted.connect(self.accept)
+        button_box.rejected.connect(self.reject)
+        
+        layout.addWidget(button_box)
+        self.setLayout(layout)
+    
+    def get_settings(self):
+        """Return the current settings"""
+        return {
+            'red_multiplier': self.red_multiplier_spin.value(),
+            'red_threshold': self.red_threshold_spin.value(),
+            'min_area': self.min_area_spin.value(),
+            'circularity': self.circularity_spin.value(),
+            'debug_viz': self.debug_viz_checkbox.isChecked()
+        }
+    
+    def set_settings(self, settings):
+        """Set the dialog values from settings"""
+        self.red_multiplier_spin.setValue(settings['red_multiplier'])
+        self.red_threshold_spin.setValue(settings['red_threshold'])
+        self.min_area_spin.setValue(settings['min_area'])
+        self.circularity_spin.setValue(settings['circularity'])
+        self.debug_viz_checkbox.setChecked(settings['debug_viz'])
+
+
+class CheckerboardSettingsDialog(QDialog):
+    """Dialog for checkerboard dimension settings"""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Checkerboard Settings")
+        self.setModal(True)
+        self.setWindowIcon(QIcon('logo.png'))
+        
+        # Create layout
+        layout = QVBoxLayout()
+        
+        # Checkerboard settings group
+        settings_group = QGroupBox("Checkerboard Dimensions")
+        settings_group.setFont(QFont("Arial", 12, QFont.Bold))
+        settings_layout = QGridLayout()
+        settings_group.setLayout(settings_layout)
+        
+        # Board width
+        settings_layout.addWidget(QLabel("Board Width:"), 0, 0)
+        self.board_width_spin = QSpinBox()
+        self.board_width_spin.setRange(2, 20)
+        self.board_width_spin.setValue(10)
+        settings_layout.addWidget(self.board_width_spin, 0, 1)
+        
+        # Board height
+        settings_layout.addWidget(QLabel("Board Height:"), 1, 0)
+        self.board_height_spin = QSpinBox()
+        self.board_height_spin.setRange(2, 20)
+        self.board_height_spin.setValue(7)
+        settings_layout.addWidget(self.board_height_spin, 1, 1)
+        
+        layout.addWidget(settings_group)
+        
+        # Buttons
+        button_box = QDialogButtonBox(
+            QDialogButtonBox.Ok | QDialogButtonBox.Cancel,
+            parent=self
+        )
+        button_box.accepted.connect(self.accept)
+        button_box.rejected.connect(self.reject)
+        
+        layout.addWidget(button_box)
+        self.setLayout(layout)
+    
+    def get_settings(self):
+        """Return the current settings"""
+        return {
+            'width': self.board_width_spin.value(),
+            'height': self.board_height_spin.value()
+        }
+    
+    def set_settings(self, settings):
+        """Set the dialog values from settings"""
+        self.board_width_spin.setValue(settings['width'])
+        self.board_height_spin.setValue(settings['height'])
+
+
+class SimplifiedTurretCalibrationApp(QMainWindow):
+    def __init__(self, camera_client, turret_client):
+        super().__init__()
+        
+        # Store clients
+        self.camera = camera_client
+        self.turret = turret_client
+        
+        # Create calibration system
+        self.calibration = TurretCalibration(self.camera, self.turret)
+        
+        # Create automatic calibrator
+        self.auto_calibrator = AutomaticCalibrator(
+            camera_client, 
+            turret_client, 
+            self.calibration
+        )
+        
+        # Setup variables
+        self.laser_on = False
+        self.selected_corner_idx = -1
+        self.corners = None
+        self.current_frame = None
+        self.calibration_mode = "IDLE"  # IDLE, DETECTED, CORNER_SELECTED, CALIBRATED
+        self.current_yaw = 0
+        self.current_pitch = 0
+        self.manual_laser_pos = None
+        self.wasd_step_size = 0.005  # Step size for WASD movement
+        self.targeting_mode = False  # Flag for click-to-target mode
+        self.show_debug_windows = False
+        
+        # Connection settings (stored for dialogs)
+        self.connection_settings = {
+            'camera_host': '127.0.0.1',
+            'camera_port': 8080,
+            'turret_host': '127.0.0.1',
+            'turret_port': 8888
+        }
+        
+        # Advanced settings (stored for dialogs)
+        self.advanced_settings = {
+            'red_multiplier': 1.3,
+            'red_threshold': 100,
+            'min_area': 5,
+            'circularity': 0.3,
+            'debug_viz': False
+        }
+        
+        # Setup UI
+        self.init_ui()
+        
+        # Create menu bar
+        self.create_menu_bar()
+        
+        # Timer for updating camera feed
+        self.camera_timer = QTimer(self)
+        self.camera_timer.timeout.connect(self.update_camera_feed)
+        self.camera_timer.start(50)  # 20 fps update rate
+        
+        # Timer for status updates
+        self.status_timer = QTimer(self)
+        self.status_timer.timeout.connect(self.update_status)
+        self.status_timer.start(1000)  # Update every second
+        
+        # Set focus policy to accept keyboard input
+        self.setFocusPolicy(Qt.StrongFocus)
+    
+    def create_menu_bar(self):
+        """Create the application menu bar"""
+        menubar = self.menuBar()
+        
+        # File menu
+        file_menu = menubar.addMenu('File')
+        
+        # Save calibration action
+        save_action = QAction('Save Calibration', self)
+        save_action.setShortcut('Ctrl+S')
+        save_action.triggered.connect(self.save_calibration)
+        file_menu.addAction(save_action)
+        
+        # Load calibration action
+        load_action = QAction('Load Calibration', self)
+        load_action.setShortcut('Ctrl+O')
+        load_action.triggered.connect(self.load_calibration)
+        file_menu.addAction(load_action)
+        
+        file_menu.addSeparator()
+        
+        # Exit action
+        exit_action = QAction('Exit', self)
+        exit_action.setShortcut('Ctrl+Q')
+        exit_action.triggered.connect(self.close)
+        file_menu.addAction(exit_action)
+        
+        # Settings menu
+        settings_menu = menubar.addMenu('Settings')
+        
+        # Connection settings action
+        connection_action = QAction('Connection Settings', self)
+        connection_action.triggered.connect(self.show_connection_settings)
+        settings_menu.addAction(connection_action)
+        
+        # Advanced settings action
+        advanced_action = QAction('Advanced Settings', self)
+        advanced_action.triggered.connect(self.show_advanced_settings)
+        settings_menu.addAction(advanced_action)
+        
+        # View menu
+        view_menu = menubar.addMenu('View')
+        
+        # Toggle debug windows action
+        debug_action = QAction('Toggle Debug Windows', self)
+        debug_action.setCheckable(True)
+        debug_action.triggered.connect(self.toggle_debug_from_menu)
+        view_menu.addAction(debug_action)
+        
+        # Help menu
+        help_menu = menubar.addMenu('Help')
+        
+        # About action
+        about_action = QAction('About', self)
+        about_action.triggered.connect(self.show_about)
+        help_menu.addAction(about_action)
+    
+    def show_connection_settings(self):
+        """Show the connection settings dialog"""
+        dialog = ConnectionSettingsDialog(self)
+        dialog.set_settings(self.connection_settings)
+        
+        # Connect the reconnect button
+        dialog.reconnect_btn.clicked.connect(lambda: self.reconnect_from_dialog(dialog))
+        
+        if dialog.exec_() == QDialog.Accepted:
+            # Update settings
+            self.connection_settings = dialog.get_settings()
+            self.log_message("Connection settings updated")
+    
+    def reconnect_from_dialog(self, dialog):
+        """Reconnect using settings from dialog"""
+        settings = dialog.get_settings()
+        self.connection_settings = settings
+        self.reconnect()
+        dialog.accept()
+    
+    def show_advanced_settings(self):
+        """Show the advanced settings dialog"""
+        dialog = AdvancedSettingsDialog(self)
+        dialog.set_settings(self.advanced_settings)
+        
+        # Connect the test button
+        dialog.test_laser_detection_btn.clicked.connect(self.test_laser_detection)
+        
+        if dialog.exec_() == QDialog.Accepted:
+            # Update settings
+            self.advanced_settings = dialog.get_settings()
+            self.update_detection_parameters()
+            self.show_debug_windows = self.advanced_settings['debug_viz']
+            if not self.show_debug_windows:
+                cv2.destroyAllWindows()
+            self.log_message("Advanced settings updated")
+    
+    def toggle_debug_from_menu(self, checked):
+        """Toggle debug windows from menu"""
+        self.show_debug_windows = checked
+        if not self.show_debug_windows:
+            cv2.destroyAllWindows()
+        self.log_message(f"Debug visualization: {'enabled' if self.show_debug_windows else 'disabled'}")
+    
+    def show_about(self):
+        """Show about dialog"""
+        QMessageBox.about(self, "About Turret Calibration", 
+                         "Turret Calibration System\n\n"
+                         "Version 1.0\n"
+                         "A system for calibrating turret aiming with camera feedback.")
+    
+    def init_ui(self):
+        # Main window settings
+        self.setWindowTitle("Turret Calibration with Automatic Calibration")
+        self.setGeometry(100, 100, 1200, 800)
+
+        self.setWindowIcon(QIcon('logo.png'))
+        
+        # Create central widget and layout
+        central_widget = QWidget()
+        main_layout = QHBoxLayout()
+        central_widget.setLayout(main_layout)
+        self.setCentralWidget(central_widget)
+        
+        # Left side - Camera view
+        camera_frame = QWidget()
+        camera_layout = QVBoxLayout()
+        camera_frame.setLayout(camera_layout)
+        
+        # Camera view label with click event
+        self.camera_view_label = ClickableLabel("Camera feed loading...")
+        self.camera_view_label.clicked.connect(self.on_image_clicked)
+        self.camera_view_label.setAlignment(Qt.AlignCenter)
+        self.camera_view_label.setMinimumSize(800, 600)
+        self.camera_view_label.setFont(QFont("Arial", 14))
+        camera_layout.addWidget(self.camera_view_label)
+        
+        # Resolution and status label
+        self.resolution_label = QLabel("Resolution: - | Use WASD to move turret (Click for targeting when calibrated)")
+        self.resolution_label.setFont(QFont("Arial", 10))
+        camera_layout.addWidget(self.resolution_label)
+        
+        main_layout.addWidget(camera_frame, 3)  # 3:1 ratio for camera to controls
+        
+        # Right side - Tabbed Controls (now only Manual Control and Calibration)
+        control_tabs = QTabWidget()
+        control_tabs.setMaximumWidth(400)  # Limit width of control panel
+
+        tab_bar_style = """
+        QTabBar::tab {
+            background-color: #f0f0f0;
+            color: black;
+            padding: 12px 25px;
+            margin-right: 2px;
+            min-width: 120px;
+            font-size: 14px;
+            font-weight: bold;
+            border: 1px solid #cccccc;
+            border-bottom: none;
+            border-top-left-radius: 4px;
+            border-top-right-radius: 4px;
+        }
+
+        QTabBar::tab:selected {
+            background-color: white;
+            border-bottom: 1px solid white;
+        }
+
+        QTabBar::tab:hover {
+            background-color: #e0e0e0;
+        }
+        """
+
+        # Apply the style only to the tab bar
+        control_tabs.tabBar().setStyleSheet(tab_bar_style)
+        
+        # Tab 1: Manual Control
         manual_tab = QWidget()
         manual_layout = QVBoxLayout()
         manual_tab.setLayout(manual_layout)
@@ -240,7 +502,7 @@ class SimplifiedTurretCalibrationApp(QMainWindow):
         wasd_group.setLayout(wasd_layout)
         
         # Instructions
-        wasd_instructions = QLabel("W: Pitch Up\nS: Pitch Down\nA: Yaw Left\nD: Yaw Right\nQ: Decrease Step\nE: Increase Step")
+        wasd_instructions = QLabel("W: Pitch Up\nS: Pitch Down\nA: Yaw Left\nD: Yaw Right\nQ: Decrease Step\nE: Increase Step\nSpace: Toggle Laser")
         wasd_instructions.setFont(QFont("Arial", 10))
         wasd_layout.addWidget(wasd_instructions)
         
@@ -282,48 +544,100 @@ class SimplifiedTurretCalibrationApp(QMainWindow):
         manual_layout.addWidget(laser_group)
         manual_layout.addStretch()
         
-        # Tab 3: Calibration
+        # Tab 2: Calibration
         calibration_tab = QWidget()
         calibration_layout = QVBoxLayout()
         calibration_tab.setLayout(calibration_layout)
         
-        # Checkerboard detection group
-        checkerboard_group = QGroupBox("Checkerboard Detection")
-        checkerboard_group.setFont(QFont("Arial", 12, QFont.Bold))
-        checkerboard_layout = QVBoxLayout()
-        checkerboard_group.setLayout(checkerboard_layout)
+        # Primary Calibration section
+        primary_group = QGroupBox("Primary Calibration")
+        primary_group.setFont(QFont("Arial", 12, QFont.Bold))
+        primary_layout = QVBoxLayout()
+        primary_group.setLayout(primary_layout)
         
-        # Checkerboard settings
-        board_settings_layout = QGridLayout()
-        
-        board_width_label = QLabel("Board Width:")
-        board_settings_layout.addWidget(board_width_label, 0, 0)
-        self.board_width_spin = QSpinBox()
-        self.board_width_spin.setRange(2, 20)
-        self.board_width_spin.setValue(self.calibration.board_size[0])
-        board_settings_layout.addWidget(self.board_width_spin, 0, 1)
-        
-        board_height_label = QLabel("Board Height:")
-        board_settings_layout.addWidget(board_height_label, 1, 0)
-        self.board_height_spin = QSpinBox()
-        self.board_height_spin.setRange(2, 20)
-        self.board_height_spin.setValue(self.calibration.board_size[1])
-        board_settings_layout.addWidget(self.board_height_spin, 1, 1)
-        
-        checkerboard_layout.addLayout(board_settings_layout)
-        
-        # Detect checkerboard button
-        self.detect_checkerboard_btn = QPushButton("Detect Checkerboard")
+        # Detect checkerboard button - large and prominent
+        self.detect_checkerboard_btn = QPushButton("DETECT CHECKERBOARD")
+        self.detect_checkerboard_btn.setMinimumHeight(50)
+        self.detect_checkerboard_btn.setFont(QFont("Arial", 12, QFont.Bold))
+        self.detect_checkerboard_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #4CAF50;
+                color: white;
+                border: none;
+                border-radius: 5px;
+            }
+            QPushButton:hover {
+                background-color: #45a049;
+            }
+            QPushButton:pressed {
+                background-color: #3d8b3d;
+            }
+        """)
         self.detect_checkerboard_btn.clicked.connect(self.detect_checkerboard)
-        checkerboard_layout.addWidget(self.detect_checkerboard_btn)
+        primary_layout.addWidget(self.detect_checkerboard_btn)
         
-        calibration_layout.addWidget(checkerboard_group)
+        # Checkerboard settings button
+        self.checkerboard_settings_btn = QPushButton("Checkerboard Settings...")
+        self.checkerboard_settings_btn.clicked.connect(self.show_checkerboard_settings)
+        primary_layout.addWidget(self.checkerboard_settings_btn)
         
-        # Calibration points group
-        cal_points_group = QGroupBox("Calibration Points")
-        cal_points_group.setFont(QFont("Arial", 12, QFont.Bold))
-        cal_points_layout = QVBoxLayout()
-        cal_points_group.setLayout(cal_points_layout)
+        # Automatic calibration button - single toggle button
+        self.auto_calibrate_btn = QPushButton("START")
+        self.auto_calibrate_btn.setMinimumHeight(40)
+        self.auto_calibrate_btn.setFont(QFont("Arial", 11, QFont.Bold))
+        self.auto_calibrate_btn.clicked.connect(self.toggle_automatic_calibration)
+        self.auto_calibrate_btn.setEnabled(False)
+        primary_layout.addWidget(self.auto_calibrate_btn)
+        
+        # Build and Reset buttons in a horizontal layout
+        build_reset_layout = QHBoxLayout()
+        
+        self.build_model_btn = QPushButton("Build Model")
+        self.build_model_btn.clicked.connect(self.build_calibration_model)
+        self.build_model_btn.setEnabled(False)
+        build_reset_layout.addWidget(self.build_model_btn)
+        
+        self.reset_calibration_btn = QPushButton("Reset")
+        self.reset_calibration_btn.clicked.connect(self.reset_calibration)
+        build_reset_layout.addWidget(self.reset_calibration_btn)
+        
+        primary_layout.addLayout(build_reset_layout)
+        
+        # Status
+        self.calibration_status_label = QLabel("Calibration: Not calibrated")
+        self.calibration_status_label.setAlignment(Qt.AlignCenter)
+        self.calibration_status_label.setFont(QFont("Arial", 10))
+        primary_layout.addWidget(self.calibration_status_label)
+        
+        calibration_layout.addWidget(primary_group)
+        
+        # Targeting Mode section
+        targeting_group = QGroupBox("Targeting Mode")
+        targeting_group.setFont(QFont("Arial", 12, QFont.Bold))
+        targeting_layout = QVBoxLayout()
+        targeting_group.setLayout(targeting_layout)
+        
+        # Toggle targeting mode button
+        self.targeting_btn = QPushButton("Enable Click-to-Target Mode")
+        self.targeting_btn.setMinimumHeight(35)
+        self.targeting_btn.setFont(QFont("Arial", 11))
+        self.targeting_btn.clicked.connect(self.toggle_targeting_mode)
+        self.targeting_btn.setEnabled(False)
+        targeting_layout.addWidget(self.targeting_btn)
+        
+        # Instructions
+        targeting_instructions = QLabel("When enabled, click anywhere on the image to aim the turret at that position.")
+        targeting_instructions.setWordWrap(True)
+        targeting_instructions.setFont(QFont("Arial", 10))
+        targeting_layout.addWidget(targeting_instructions)
+        
+        calibration_layout.addWidget(targeting_group)
+        
+        # Manual Calibration section
+        manual_group = QGroupBox("Manual Calibration")
+        manual_group.setFont(QFont("Arial", 12, QFont.Bold))
+        manual_layout = QVBoxLayout()
+        manual_group.setLayout(manual_layout)
         
         # Corner selection
         corner_combo_layout = QHBoxLayout()
@@ -333,154 +647,30 @@ class SimplifiedTurretCalibrationApp(QMainWindow):
         self.corner_combo.addItem("None")
         self.corner_combo.currentIndexChanged.connect(self.update_selected_corner)
         corner_combo_layout.addWidget(self.corner_combo)
-        cal_points_layout.addLayout(corner_combo_layout)
+        manual_layout.addLayout(corner_combo_layout)
         
         # Position display
         self.laser_pos_label = QLabel("Position: Not selected")
-        cal_points_layout.addWidget(self.laser_pos_label)
+        manual_layout.addWidget(self.laser_pos_label)
         
         # Capture button
         self.capture_point_btn = QPushButton("Capture Calibration Point")
         self.capture_point_btn.clicked.connect(self.capture_calibration_point)
         self.capture_point_btn.setEnabled(False)
-        cal_points_layout.addWidget(self.capture_point_btn)
+        manual_layout.addWidget(self.capture_point_btn)
         
-        calibration_layout.addWidget(cal_points_group)
+        # Manual instructions
+        manual_instructions = QLabel("1. Select a corner\n2. Click on the image to mark laser position\n3. Capture the calibration point")
+        manual_instructions.setFont(QFont("Arial", 10))
+        manual_layout.addWidget(manual_instructions)
         
-        # Calibration control group
-        cal_control_group = QGroupBox("Calibration Control")
-        cal_control_group.setFont(QFont("Arial", 12, QFont.Bold))
-        cal_control_layout = QVBoxLayout()
-        cal_control_group.setLayout(cal_control_layout)
-
-        # Instructions for automatic calibration
-        auto_cal_instructions = QLabel(
-            "Automatic Calibration:\n"
-            "1. Manually position laser on a corner\n"
-            "2. Select that corner in the dropdown\n"
-            "3. Click 'Start Automatic Calibration'\n"
-            "4. The system will automatically move to\n"
-            "   and calibrate all other corners"
-        )
-        auto_cal_instructions.setWordWrap(True)
-        auto_cal_instructions.setFont(QFont("Arial", 10))
-        cal_control_layout.addWidget(auto_cal_instructions)
-
-        # Automatic calibration buttons
-        self.auto_calibrate_btn = QPushButton("Start Automatic Calibration")
-        self.auto_calibrate_btn.clicked.connect(self.start_automatic_calibration)
-        cal_control_layout.addWidget(self.auto_calibrate_btn)
-
-        self.stop_auto_cal_btn = QPushButton("Stop Automatic Calibration")
-        self.stop_auto_cal_btn.clicked.connect(self.stop_automatic_calibration)
-        self.stop_auto_cal_btn.setEnabled(False)
-        cal_control_layout.addWidget(self.stop_auto_cal_btn)
+        calibration_layout.addWidget(manual_group)
         
-        # Build model button
-        self.build_model_btn = QPushButton("Build Calibration Model")
-        self.build_model_btn.clicked.connect(self.build_calibration_model)
-        self.build_model_btn.setEnabled(False)
-        cal_control_layout.addWidget(self.build_model_btn)
+        calibration_layout.addStretch()
         
-        # Save/Load buttons
-        save_load_layout = QHBoxLayout()
-        
-        self.save_cal_btn = QPushButton("Save Calibration")
-        self.save_cal_btn.clicked.connect(self.save_calibration)
-        self.save_cal_btn.setEnabled(False)
-        save_load_layout.addWidget(self.save_cal_btn)
-        
-        self.load_cal_btn = QPushButton("Load Calibration")
-        self.load_cal_btn.clicked.connect(self.load_calibration)
-        save_load_layout.addWidget(self.load_cal_btn)
-        
-        cal_control_layout.addLayout(save_load_layout)
-        
-        # Reset calibration button
-        self.reset_calibration_btn = QPushButton("Reset Calibration")
-        self.reset_calibration_btn.clicked.connect(self.reset_calibration)
-        cal_control_layout.addWidget(self.reset_calibration_btn)
-        
-        # Status 
-        self.calibration_status_label = QLabel("Calibration: Not calibrated")
-        cal_control_layout.addWidget(self.calibration_status_label)
-        
-        # Toggle targeting mode
-        self.targeting_btn = QPushButton("Toggle Click-to-Target Mode")
-        self.targeting_btn.clicked.connect(self.toggle_targeting_mode)
-        self.targeting_btn.setEnabled(False)
-        cal_control_layout.addWidget(self.targeting_btn)
-        
-        calibration_layout.addWidget(cal_control_group)
-        
-        # Tab 4: Advanced
-        advanced_tab = QWidget()
-        advanced_layout = QVBoxLayout()
-        advanced_tab.setLayout(advanced_layout)
-        
-        # Laser Detection Settings group
-        detection_group = QGroupBox("Laser Detection Settings")
-        detection_group.setFont(QFont("Arial", 12, QFont.Bold))
-        detection_layout = QVBoxLayout()
-        detection_group.setLayout(detection_layout)
-        
-        # Add adjustable parameters
-        param_layout = QGridLayout()
-        
-        # Red multiplier
-        param_layout.addWidget(QLabel("Red Dominance:"), 0, 0)
-        self.red_multiplier_spin = QDoubleSpinBox()
-        self.red_multiplier_spin.setRange(1.0, 2.0)
-        self.red_multiplier_spin.setValue(1.3)
-        self.red_multiplier_spin.setSingleStep(0.1)
-        self.red_multiplier_spin.valueChanged.connect(self.update_detection_parameters)
-        param_layout.addWidget(self.red_multiplier_spin, 0, 1)
-        
-        # Red threshold
-        param_layout.addWidget(QLabel("Red Threshold:"), 1, 0)
-        self.red_threshold_spin = QSpinBox()
-        self.red_threshold_spin.setRange(0, 255)
-        self.red_threshold_spin.setValue(100)
-        self.red_threshold_spin.valueChanged.connect(self.update_detection_parameters)
-        param_layout.addWidget(self.red_threshold_spin, 1, 1)
-        
-        # Min area
-        param_layout.addWidget(QLabel("Min Area:"), 2, 0)
-        self.min_area_spin = QSpinBox()
-        self.min_area_spin.setRange(1, 1000)
-        self.min_area_spin.setValue(5)
-        self.min_area_spin.valueChanged.connect(self.update_detection_parameters)
-        param_layout.addWidget(self.min_area_spin, 2, 1)
-        
-        # Circularity threshold
-        param_layout.addWidget(QLabel("Circularity:"), 3, 0)
-        self.circularity_spin = QDoubleSpinBox()
-        self.circularity_spin.setRange(0.0, 1.0)
-        self.circularity_spin.setValue(0.3)
-        self.circularity_spin.setSingleStep(0.1)
-        self.circularity_spin.valueChanged.connect(self.update_detection_parameters)
-        param_layout.addWidget(self.circularity_spin, 3, 1)
-        
-        detection_layout.addLayout(param_layout)
-        
-        # Debug visualization checkbox
-        self.debug_viz_checkbox = QCheckBox("Show Debug Windows")
-        self.debug_viz_checkbox.stateChanged.connect(self.toggle_debug_visualization)
-        detection_layout.addWidget(self.debug_viz_checkbox)
-        
-        # Test laser detection button
-        self.test_laser_detection_btn = QPushButton("Test Laser Detection")
-        self.test_laser_detection_btn.clicked.connect(self.test_laser_detection)
-        detection_layout.addWidget(self.test_laser_detection_btn)
-        
-        advanced_layout.addWidget(detection_group)
-        advanced_layout.addStretch()
-        
-        # Add all tabs
-        control_tabs.addTab(connection_tab, "Connection")
+        # Add all tabs (now only 2 tabs)
         control_tabs.addTab(manual_tab, "Manual Control")
         control_tabs.addTab(calibration_tab, "Calibration")
-        control_tabs.addTab(advanced_tab, "Advanced")
         
         main_layout.addWidget(control_tabs, 1)
         
@@ -501,13 +691,52 @@ class SimplifiedTurretCalibrationApp(QMainWindow):
         self.setStatusBar(self.statusBar)
         self.statusBar.showMessage("System initialized")
     
+    def show_checkerboard_settings(self):
+        """Show the checkerboard settings dialog"""
+        dialog = CheckerboardSettingsDialog(self)
+        dialog.set_settings({
+            'width': self.calibration.board_size[0],
+            'height': self.calibration.board_size[1]
+        })
+        
+        if dialog.exec_() == QDialog.Accepted:
+            settings = dialog.get_settings()
+            self.calibration.board_size = (settings['width'], settings['height'])
+            self.log_message(f"Checkerboard dimensions updated to {settings['width']}x{settings['height']}")
+    
+    def toggle_automatic_calibration(self):
+        """Toggle automatic calibration on/off"""
+        if hasattr(self, 'auto_calibrator') and self.auto_calibrator.is_calibrating:
+            # Stop calibration
+            self.stop_automatic_calibration()
+            self.auto_calibrate_btn.setText("START")
+            self.auto_calibrate_btn.setStyleSheet("")  # Reset to default style
+        else:
+            # Start calibration
+            self.start_automatic_calibration()
+            self.auto_calibrate_btn.setText("STOP")
+            self.auto_calibrate_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #f44336;
+                    color: white;
+                    border: none;
+                    border-radius: 5px;
+                }
+                QPushButton:hover {
+                    background-color: #da190b;
+                }
+                QPushButton:pressed {
+                    background-color: #b91400;
+                }
+            """)
+    
     def update_detection_parameters(self):
-        """Update laser detection parameters from UI"""
+        """Update laser detection parameters from settings"""
         detector = self.auto_calibrator.laser_detector
-        detector.red_multiplier = self.red_multiplier_spin.value()
-        detector.red_threshold = self.red_threshold_spin.value()
-        detector.min_area = self.min_area_spin.value()
-        detector.circularity_threshold = self.circularity_spin.value()
+        detector.red_multiplier = self.advanced_settings['red_multiplier']
+        detector.red_threshold = self.advanced_settings['red_threshold']
+        detector.min_area = self.advanced_settings['min_area']
+        detector.circularity_threshold = self.advanced_settings['circularity']
         detector.update_color_ranges()
         self.log_message("Updated detection parameters")
     
@@ -549,8 +778,6 @@ class SimplifiedTurretCalibrationApp(QMainWindow):
             time.sleep(0.5)  # Give laser time to turn on
         
         # Disable manual controls during auto calibration
-        self.auto_calibrate_btn.setEnabled(False)
-        self.stop_auto_cal_btn.setEnabled(True)
         self.capture_point_btn.setEnabled(False)
         
         # Start automatic calibration from the selected corner
@@ -566,8 +793,6 @@ class SimplifiedTurretCalibrationApp(QMainWindow):
         self.auto_calibrator.stop_calibration()
         
         # Re-enable manual controls
-        self.auto_calibrate_btn.setEnabled(True)
-        self.stop_auto_cal_btn.setEnabled(False)
         self.capture_point_btn.setEnabled(True)
         
         # Check if we have enough points to build the model
@@ -645,10 +870,10 @@ class SimplifiedTurretCalibrationApp(QMainWindow):
         
         # Add WASD control reminder
         if self.targeting_mode:
-            cv2.putText(display_frame, "TARGETING MODE - CLICK TO AIM", (20, 30),
+            cv2.putText(display_frame, "TARGETING MODE - CLICK TO AIM", (100, 50),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
         else:
-            cv2.putText(display_frame, "WASD: Move | Q/E: Adjust Step", (20, 30),
+            cv2.putText(display_frame, "WASD: Move | Q/E: Adjust Step | Space: Toggle Laser", (100, 50),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
             
         # Convert to Qt format for display
@@ -769,12 +994,7 @@ class SimplifiedTurretCalibrationApp(QMainWindow):
             self.log_message("No frame available")
             return
         
-        # Update board size from UI
-        width = self.board_width_spin.value()
-        height = self.board_height_spin.value()
-        self.calibration.board_size = (width, height)
-        
-        self.log_message(f"Detecting checkerboard with size {width}x{height}...")
+        self.log_message(f"Detecting checkerboard with size {self.calibration.board_size[0]}x{self.calibration.board_size[1]}...")
         
         # Detect checkerboard
         corners, display_frame = self.calibration.detect_checkerboard(self.current_frame)
@@ -791,6 +1011,9 @@ class SimplifiedTurretCalibrationApp(QMainWindow):
             
             # Update calibration mode
             self.calibration_mode = "DETECTED"
+            
+            # Enable automatic calibration button
+            self.auto_calibrate_btn.setEnabled(True)
         else:
             self.log_message("Failed to detect checkerboard")
     
@@ -880,7 +1103,6 @@ class SimplifiedTurretCalibrationApp(QMainWindow):
             self.log_message("Calibration model built successfully")
             self.calibration_status_label.setText("Calibration: Calibrated")
             self.calibration_mode = "CALIBRATED"
-            self.save_cal_btn.setEnabled(True)
             self.targeting_btn.setEnabled(True)
         else:
             self.log_message("Failed to build calibration model")
@@ -919,7 +1141,6 @@ class SimplifiedTurretCalibrationApp(QMainWindow):
                 self.log_message(f"Calibration loaded from {file_path}")
                 self.calibration_status_label.setText("Calibration: Calibrated")
                 self.calibration_mode = "CALIBRATED"
-                self.save_cal_btn.setEnabled(True)
                 self.targeting_btn.setEnabled(True)
             else:
                 self.log_message("Failed to load calibration")
@@ -934,10 +1155,19 @@ class SimplifiedTurretCalibrationApp(QMainWindow):
         
         if self.targeting_mode:
             self.log_message("Targeting mode enabled - Click on image to aim turret")
-            self.targeting_btn.setText("Disable Targeting Mode")
+            self.targeting_btn.setText("Disable Click-to-Target Mode")
+            self.targeting_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #f44336;
+                    color: white;
+                    border: none;
+                    border-radius: 5px;
+                }
+            """)
         else:
             self.log_message("Targeting mode disabled")
-            self.targeting_btn.setText("Enable Targeting Mode")
+            self.targeting_btn.setText("Enable Click-to-Target Mode")
+            self.targeting_btn.setStyleSheet("")  # Reset to default style
     
     def reset_calibration(self):
         """Reset the calibration data"""
@@ -951,7 +1181,6 @@ class SimplifiedTurretCalibrationApp(QMainWindow):
         self.corner_combo.addItem("None")
         self.build_model_btn.setEnabled(False)
         self.capture_point_btn.setEnabled(False)
-        self.save_cal_btn.setEnabled(False)
         self.targeting_btn.setEnabled(False)
         self.targeting_mode = False
         
@@ -961,17 +1190,16 @@ class SimplifiedTurretCalibrationApp(QMainWindow):
     def update_status(self):
         """Update status information"""
         # Check if automatic calibration is done
-        if hasattr(self, 'auto_calibrator') and not self.auto_calibrator.is_calibrating and self.stop_auto_cal_btn.isEnabled():
+        if hasattr(self, 'auto_calibrator') and not self.auto_calibrator.is_calibrating and self.auto_calibrate_btn.text() == "STOP":
             # Auto calibration finished
-            self.auto_calibrate_btn.setEnabled(True)
-            self.stop_auto_cal_btn.setEnabled(False)
+            self.auto_calibrate_btn.setText("START")
+            self.auto_calibrate_btn.setStyleSheet("")  # Reset to default style
             
             # Enable build model button if we have enough points
             if len(self.calibration.calibration_data) >= 5:
                 self.build_model_btn.setEnabled(True)
                 
             if self.calibration.is_calibrated:
-                self.save_cal_btn.setEnabled(True)
                 self.targeting_btn.setEnabled(True)
                 self.calibration_status_label.setText("Calibration: Calibrated")
                 self.calibration_mode = "CALIBRATED"
@@ -998,11 +1226,11 @@ class SimplifiedTurretCalibrationApp(QMainWindow):
         self.camera.disconnect()
         self.turret.disconnect()
         
-        # Get new connection parameters
-        camera_host = self.camera_host_edit.text()
-        camera_port = self.camera_port_spin.value()
-        turret_host = self.turret_host_edit.text()
-        turret_port = self.turret_port_spin.value()
+        # Get connection parameters from stored settings
+        camera_host = self.connection_settings['camera_host']
+        camera_port = self.connection_settings['camera_port']
+        turret_host = self.connection_settings['turret_host']
+        turret_port = self.connection_settings['turret_port']
         
         # Reconnect
         self.log_message(f"Reconnecting to camera at {camera_host}:{camera_port}")
@@ -1055,3 +1283,79 @@ class SimplifiedTurretCalibrationApp(QMainWindow):
         cv2.destroyAllWindows()
         
         event.accept()
+    
+    def _map_label_click_to_image_coords(self, click_pos):
+        """Maps a click position on the camera_view_label to image coordinates."""
+        label_widget = self.camera_view_label
+        label_size = label_widget.size()
+        
+        current_pixmap = label_widget.pixmap()
+        if not current_pixmap or current_pixmap.isNull():
+            self.log_message("Debug: _map_label_click_to_image_coords - No pixmap in label.")
+            return None # No pixmap
+            
+        pixmap_size = current_pixmap.size() # Original image size
+        
+        if pixmap_size.width() == 0 or pixmap_size.height() == 0:
+            self.log_message(f"Debug: _map_label_click_to_image_coords - Invalid pixmap size: {pixmap_size.width()}x{pixmap_size.height()}")
+            return None # Invalid pixmap size
+
+        # Calculate the offset of the pixmap within the label (due to Qt.AlignCenter)
+        offset_x = (label_size.width() - pixmap_size.width()) / 2.0
+        offset_y = (label_size.height() - pixmap_size.height()) / 2.0
+
+        # Convert click coordinates from label space to pixmap space
+        img_x_float = click_pos.x() - offset_x
+        img_y_float = click_pos.y() - offset_y
+
+        # Check if the click is within the actual bounds of the pixmap
+        if 0 <= img_x_float < pixmap_size.width() and \
+           0 <= img_y_float < pixmap_size.height():
+            return int(img_x_float), int(img_y_float)
+        else:
+            self.log_message(f"Debug: Click ({click_pos.x()},{click_pos.y()}) mapped to ({img_x_float:.1f},{img_y_float:.1f}) is outside pixmap ({pixmap_size.width()},{pixmap_size.height()})")
+            return None
+    
+    def show_debug_visualization(self, frame, debug_info):
+        """Display debug visualization windows"""
+        if not self.show_debug_windows:
+            return
+        
+        # Show different masks and detection stages
+        if 'red_mask' in debug_info and debug_info['red_mask'] is not None:
+            cv2.imshow("Red Mask", debug_info['red_mask'])
+        
+        if 'red_dominant' in debug_info and debug_info['red_dominant'] is not None:
+            cv2.imshow("Red Dominant", debug_info['red_dominant'])
+        
+        if 'combined_mask' in debug_info and debug_info['combined_mask'] is not None:
+            cv2.imshow("Combined Mask", debug_info['combined_mask'])
+        
+        if 'final_mask1' in debug_info and debug_info['final_mask1'] is not None:
+            cv2.imshow("Final Mask (with brightness)", debug_info['final_mask1'])
+        
+        if 'final_mask2' in debug_info and debug_info['final_mask2'] is not None:
+            cv2.imshow("Final Mask (without brightness)", debug_info['final_mask2'])
+        
+        # Show detection result
+        if frame is not None:
+            result_frame = frame.copy()
+            
+            # Draw all contours
+            if 'contours1' in debug_info:
+                cv2.drawContours(result_frame, debug_info['contours1'], -1, (0, 255, 0), 1)
+            if 'contours2' in debug_info:
+                cv2.drawContours(result_frame, debug_info['contours2'], -1, (0, 255, 255), 1)
+            
+            # Draw best contour
+            if 'best_contour' in debug_info and debug_info['best_contour'] is not None:
+                cv2.drawContours(result_frame, [debug_info['best_contour']], -1, (255, 0, 0), 2)
+            
+            # Draw detected laser position
+            if 'laser_pos' in debug_info and debug_info['laser_pos'] is not None:
+                pos = debug_info['laser_pos']
+                cv2.circle(result_frame, pos, 10, (0, 0, 255), 2)
+                cv2.putText(result_frame, f"Laser: {pos}", (pos[0]+15, pos[1]), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
+            
+            cv2.imshow("Detection Result", result_frame)

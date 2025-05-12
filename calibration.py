@@ -155,6 +155,9 @@ class TurretCalibration:
             self.compute_homography()
         
         self.is_calibrated = True
+
+        self.print_calibration_stats()
+
         return True
     
     def predict_position(self, image_x, image_y, method='auto'):
@@ -340,3 +343,103 @@ class TurretCalibration:
         except Exception as e:
             print(f"Error loading calibration: {str(e)}")
             return False
+        
+    def print_calibration_stats(self):
+        """Print statistics about the calibration model"""
+        if not self.is_calibrated:
+            print("Model is not calibrated yet.")
+            return
+        
+        print("\n=== Calibration Statistics ===")
+        print(f"Number of calibration points: {len(self.calibration_data)}")
+        print(f"Checkerboard size: {self.board_size}")
+        
+        # Extract data for error computation
+        data = np.array(self.calibration_data)
+        X = data[:, 0:2]  # Camera x,y coordinates
+        Y_pan = data[:, 2]  # Pan/Yaw angles
+        Y_tilt = data[:, 3]  # Tilt/Pitch angles
+        
+        # Transform to polynomial features
+        X_poly = self.poly_features.transform(X)
+        
+        # Linear model statistics
+        if self.pan_model is not None:
+            print("\n--- Linear Model Statistics ---")
+            pan_pred = self.pan_model.predict(X_poly)
+            tilt_pred = self.tilt_model.predict(X_poly)
+            
+            # Compute errors
+            pan_mse = np.mean((Y_pan - pan_pred) ** 2)
+            tilt_mse = np.mean((Y_tilt - tilt_pred) ** 2)
+            pan_abs_max = np.max(np.abs(Y_pan - pan_pred))
+            tilt_abs_max = np.max(np.abs(Y_tilt - tilt_pred))
+            
+            # R² score
+            pan_r2 = self.pan_model.score(X_poly, Y_pan)
+            tilt_r2 = self.tilt_model.score(X_poly, Y_tilt)
+            
+            print(f"Pan R² score: {pan_r2:.4f}")
+            print(f"Tilt R² score: {tilt_r2:.4f}")
+            print(f"Pan RMSE: {np.sqrt(pan_mse):.6f} degrees")
+            print(f"Tilt RMSE: {np.sqrt(tilt_mse):.6f} degrees")
+            print(f"Pan max absolute error: {pan_abs_max:.6f} degrees")
+            print(f"Tilt max absolute error: {tilt_abs_max:.6f} degrees")
+        
+        # RANSAC model statistics
+        if self.use_ransac and self.ransac_pan_model is not None:
+            print("\n--- RANSAC Model Statistics ---")
+            ransac_pan_pred = self.ransac_pan_model.predict(X_poly)
+            ransac_tilt_pred = self.ransac_tilt_model.predict(X_poly)
+            
+            # Compute errors
+            ransac_pan_mse = np.mean((Y_pan - ransac_pan_pred) ** 2)
+            ransac_tilt_mse = np.mean((Y_tilt - ransac_tilt_pred) ** 2)
+            ransac_pan_abs_max = np.max(np.abs(Y_pan - ransac_pan_pred))
+            ransac_tilt_abs_max = np.max(np.abs(Y_tilt - ransac_tilt_pred))
+            
+            # R² score
+            ransac_pan_r2 = self.ransac_pan_model.score(X_poly, Y_pan)
+            ransac_tilt_r2 = self.ransac_tilt_model.score(X_poly, Y_tilt)
+            
+            # Inlier statistics
+            pan_inlier_mask = self.ransac_pan_model.inlier_mask_
+            tilt_inlier_mask = self.ransac_tilt_model.inlier_mask_
+            pan_inliers = np.sum(pan_inlier_mask)
+            tilt_inliers = np.sum(tilt_inlier_mask)
+            
+            print(f"Pan R² score: {ransac_pan_r2:.4f}")
+            print(f"Tilt R² score: {ransac_tilt_r2:.4f}")
+            print(f"Pan RMSE: {np.sqrt(ransac_pan_mse):.6f} degrees")
+            print(f"Tilt RMSE: {np.sqrt(ransac_tilt_mse):.6f} degrees")
+            print(f"Pan max absolute error: {ransac_pan_abs_max:.6f} degrees")
+            print(f"Tilt max absolute error: {ransac_tilt_abs_max:.6f} degrees")
+            print(f"Pan inliers: {pan_inliers}/{len(X)} ({pan_inliers/len(X)*100:.1f}%)")
+            print(f"Tilt inliers: {tilt_inliers}/{len(X)} ({tilt_inliers/len(X)*100:.1f}%)")
+        
+        # Homography matrix statistics
+        if self.use_homography and self.homography_matrix is not None:
+            print("\n--- Homography Matrix Statistics ---")
+            try:
+                # Calculate condition number properly
+                singular_values = np.linalg.svd(self.homography_matrix, compute_uv=False)
+                condition_number = float(singular_values[0] / singular_values[-1])
+                
+                # Reprojection error using homography
+                homography_errors = []
+                for point in self.calibration_data:
+                    image_x, image_y, pan, tilt = point
+                    predicted = self.predict_position_homography(image_x, image_y)
+                    if predicted is not None:
+                        pred_pan, pred_tilt = predicted
+                        error = np.sqrt((pan - pred_pan)**2 + (tilt - pred_tilt)**2)
+                        homography_errors.append(error)
+                
+                if homography_errors:
+                    avg_error = np.mean(homography_errors)
+                    max_error = np.max(homography_errors)
+                    print(f"Homography matrix condition number: {condition_number:.2f}")
+                    print(f"Homography average reprojection error: {avg_error:.6f} degrees")
+                    print(f"Homography maximum reprojection error: {max_error:.6f} degrees")
+            except Exception as e:
+                print(f"Error calculating homography statistics: {str(e)}")

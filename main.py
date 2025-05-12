@@ -1,22 +1,7 @@
 import sys
-import cv2
-import numpy as np
-import time
 import matplotlib.pyplot as plt
-import pickle
-import os
-from sklearn.linear_model import LinearRegression
-from sklearn.preprocessing import PolynomialFeatures
-from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
-from matplotlib.figure import Figure
-from PyQt5.QtWidgets import (QApplication, QMainWindow, QPushButton, QLabel, 
-                            QVBoxLayout, QHBoxLayout, QGridLayout, QWidget, 
-                            QGroupBox, QComboBox, QSpinBox, QDoubleSpinBox, QLineEdit, 
-                            QTextEdit, QMessageBox, QSplitter, QStatusBar, QFileDialog,
-                            QSlider, QCheckBox, QTabWidget, QDockWidget)
-from PyQt5.QtGui import QImage, QPixmap, QFont, QKeyEvent, QIcon
-from PyQt5.QtCore import Qt, QTimer, QMutex, pyqtSignal
-
+from PyQt5.QtWidgets import QApplication
+from PyQt5.QtGui import QIcon
 
 from turret_client import TurretClient
 from camera_client import CameraStreamClient

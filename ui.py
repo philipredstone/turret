@@ -21,6 +21,7 @@ from PyQt5.QtCore import Qt, QTimer, QMutex, pyqtSignal
 from clickable_label import ClickableLabel
 from calibration import TurretCalibration
 from automatic_calibrator import AutomaticCalibrator
+from object_detector import YoloObjectDetector
 
 
 class ConnectionSettingsDialog(QDialog):
@@ -316,6 +317,7 @@ class SimplifiedTurretCalibrationApp(QMainWindow):
     - Manual and automatic calibration workflows
     - Calibration model building and validation
     - Click-to-target functionality for aiming
+    - Object detection and automatic targeting with YOLO
     - Settings dialogs for configuration
     - Real-time status monitoring and logging
     """
@@ -343,6 +345,16 @@ class SimplifiedTurretCalibrationApp(QMainWindow):
             turret_client, 
             self.calibration
         )
+        
+        # Create object detector for YOLO-based targeting
+        self.object_detector = YoloObjectDetector(model_name="yolo11n")
+        self.object_detector.status_callback = self.log_message
+        self.object_detector.detection_callback = self.on_object_detected
+        
+        # Object targeting state
+        self.auto_targeting_enabled = False
+        self.targeting_loop_timer = QTimer(self)
+        self.targeting_loop_timer.timeout.connect(self.targeting_loop)
         
         # Application state variables
         self.laser_on = False                 # Current laser state
@@ -754,10 +766,114 @@ class SimplifiedTurretCalibrationApp(QMainWindow):
         calibration_layout.addWidget(manual_group)
         
         calibration_layout.addStretch()  # Push content to top
+
+        # Tab 3: Object Detection
+        object_detection_tab = QWidget()
+        object_detection_layout = QVBoxLayout()
+        object_detection_tab.setLayout(object_detection_layout)
+
+        # Model loading group
+        model_group = QGroupBox("YOLO Model")
+        model_group.setFont(QFont("Arial", 12, QFont.Bold))
+        model_layout = QVBoxLayout()
+        model_group.setLayout(model_layout)
+
+        # Model path and load button
+        model_path_layout = QHBoxLayout()
+        model_path_layout.addWidget(QLabel("Model Path:"))
+        self.model_path_edit = QLineEdit("yolov5s.pt")  # Default path
+        model_path_layout.addWidget(self.model_path_edit)
+
+        model_browse_btn = QPushButton("Browse")
+        model_browse_btn.clicked.connect(self.browse_yolo_model)
+        model_path_layout.addWidget(model_browse_btn)
+
+        model_layout.addLayout(model_path_layout)
+
+        # Load model button
+        self.load_model_btn = QPushButton("Load Model")
+        self.load_model_btn.clicked.connect(self.load_yolo_model)
+        model_layout.addWidget(self.load_model_btn)
+
+        # Model info display
+        self.model_info_label = QLabel("Model not loaded")
+        model_layout.addWidget(self.model_info_label)
+
+        object_detection_layout.addWidget(model_group)
+
+        # Detection Settings group
+        detection_group = QGroupBox("Detection Settings")
+        detection_group.setFont(QFont("Arial", 12, QFont.Bold))
+        detection_layout = QVBoxLayout()
+        detection_group.setLayout(detection_layout)
+
+        # Confidence threshold control
+        confidence_layout = QHBoxLayout()
+        confidence_layout.addWidget(QLabel("Confidence Threshold:"))
+        self.confidence_threshold_spin = QDoubleSpinBox()
+        self.confidence_threshold_spin.setRange(0.1, 0.99)
+        self.confidence_threshold_spin.setValue(0.5)
+        self.confidence_threshold_spin.setSingleStep(0.05)
+        self.confidence_threshold_spin.valueChanged.connect(self.update_confidence_threshold)
+        confidence_layout.addWidget(self.confidence_threshold_spin)
+        detection_layout.addLayout(confidence_layout)
+
+        # Target classes selection
+        target_classes_layout = QVBoxLayout()
+        target_classes_layout.addWidget(QLabel("Target Classes:"))
+        self.target_classes_edit = QLineEdit("person,car,dog,cat")  # Default classes
+        target_classes_layout.addWidget(self.target_classes_edit)
+        detection_layout.addLayout(target_classes_layout)
+
+        # Targeting mode selection
+        targeting_mode_layout = QHBoxLayout()
+        targeting_mode_layout.addWidget(QLabel("Targeting Mode:"))
+        self.targeting_mode_combo = QComboBox()
+        self.targeting_mode_combo.addItems(["largest", "center", "closest"])
+        self.targeting_mode_combo.currentTextChanged.connect(self.update_targeting_mode)
+        targeting_mode_layout.addWidget(self.targeting_mode_combo)
+        detection_layout.addLayout(targeting_mode_layout)
+
+        # Apply settings button
+        self.apply_detection_settings_btn = QPushButton("Apply Settings")
+        self.apply_detection_settings_btn.clicked.connect(self.apply_detection_settings)
+        detection_layout.addWidget(self.apply_detection_settings_btn)
+
+        object_detection_layout.addWidget(detection_group)
+
+        # Automatic targeting group
+        auto_targeting_group = QGroupBox("Automatic Targeting")
+        auto_targeting_group.setFont(QFont("Arial", 12, QFont.Bold))
+        auto_targeting_layout = QVBoxLayout()
+        auto_targeting_group.setLayout(auto_targeting_layout)
+
+        # Toggle automatic targeting
+        self.auto_targeting_btn = QPushButton("Start Automatic Targeting")
+        self.auto_targeting_btn.setMinimumHeight(40)
+        self.auto_targeting_btn.setFont(QFont("Arial", 11, QFont.Bold))
+        self.auto_targeting_btn.clicked.connect(self.toggle_auto_targeting)
+        self.auto_targeting_btn.setEnabled(False)  # Disabled until model and calibration ready
+        auto_targeting_layout.addWidget(self.auto_targeting_btn)
+
+        # Laser during auto targeting option
+        self.auto_laser_checkbox = QCheckBox("Turn on laser during targeting")
+        self.auto_laser_checkbox.setChecked(True)
+        auto_targeting_layout.addWidget(self.auto_laser_checkbox)
+
+        # Auto targeting instructions
+        auto_targeting_instructions = QLabel(
+            "Automatic targeting will aim the turret at detected objects based on the selected targeting mode."
+        )
+        auto_targeting_instructions.setWordWrap(True)
+        auto_targeting_layout.addWidget(auto_targeting_instructions)
+
+        object_detection_layout.addWidget(auto_targeting_group)
+        object_detection_layout.addStretch()  # Push content to top
         
         # Add tabs to tab widget
         control_tabs.addTab(manual_tab, "Manual Control")
         control_tabs.addTab(calibration_tab, "Calibration")
+        control_tabs.addTab(object_detection_tab, "Object Detection")
         
         main_layout.addWidget(control_tabs, 1)  # Takes 1/4 of horizontal space
         
@@ -959,6 +1075,25 @@ class SimplifiedTurretCalibrationApp(QMainWindow):
             cv2.circle(display_frame, self.manual_laser_pos, 8, (255, 0, 255), -1)
             cv2.putText(display_frame, "Laser", (self.manual_laser_pos[0]+10, self.manual_laser_pos[1]-10),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 255), 2)
+
+        # Draw object detection results if available
+        if hasattr(self, 'object_detector') and self.object_detector.is_detecting:
+            target = self.object_detector.get_target()
+            if target is not None:
+                center_x, center_y = target['center']
+                x1, y1, x2, y2 = target['box']
+                
+                # Draw target box with thicker lines
+                cv2.rectangle(display_frame, (x1, y1), (x2, y2), (0, 0, 255), 3)
+                
+                # Draw target center with crosshairs
+                cv2.circle(display_frame, (center_x, center_y), 8, (0, 255, 255), -1)
+                cv2.line(display_frame, (center_x - 15, center_y), (center_x + 15, center_y), (0, 255, 255), 2)
+                cv2.line(display_frame, (center_x, center_y - 15), (center_x, center_y + 15), (0, 255, 255), 2)
+                
+                # Draw target info
+                label = f"TARGET: {target['class_name']} ({target['confidence']:.2f})"
+                cv2.putText(display_frame, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
         
         # Add mode-specific overlay text
         if self.targeting_mode:
@@ -1228,6 +1363,10 @@ class SimplifiedTurretCalibrationApp(QMainWindow):
             self.calibration_status_label.setText("Calibration: Calibrated")
             self.calibration_mode = "CALIBRATED"
             self.targeting_btn.setEnabled(True)  # Enable targeting mode
+            
+            # Enable auto targeting button if model is loaded
+            if self.calibration.is_calibrated and hasattr(self, 'object_detector') and self.object_detector.model is not None:
+                self.auto_targeting_btn.setEnabled(True)
         else:
             self.log_message("Failed to build calibration model")
     
@@ -1266,6 +1405,10 @@ class SimplifiedTurretCalibrationApp(QMainWindow):
                 self.calibration_status_label.setText("Calibration: Calibrated")
                 self.calibration_mode = "CALIBRATED"
                 self.targeting_btn.setEnabled(True)  # Enable targeting mode
+                
+                # Enable auto targeting button if model is loaded
+                if self.object_detector.model is not None:
+                    self.auto_targeting_btn.setEnabled(True)
             else:
                 self.log_message("Failed to load calibration")
     
@@ -1308,8 +1451,169 @@ class SimplifiedTurretCalibrationApp(QMainWindow):
         self.targeting_btn.setEnabled(False)
         self.targeting_mode = False
         
+        # Reset auto targeting
+        if self.auto_targeting_enabled:
+            self.toggle_auto_targeting()
+        
         self.log_message("Calibration data reset")
         self.calibration_status_label.setText("Calibration: Not calibrated")
+    
+    def browse_yolo_model(self):
+        """Browse for YOLO model file using file dialog."""
+        file_dialog = QFileDialog()
+        file_path, _ = file_dialog.getOpenFileName(
+            self, "Select YOLO Model", "", "PyTorch Models (*.pt);;All Files (*)"
+        )
+        
+        if file_path:
+            self.model_path_edit.setText(file_path)
+
+    def load_yolo_model(self):
+        """Load YOLO model from specified path."""
+        model_path = self.model_path_edit.text().strip()
+        
+        if not model_path:
+            self.log_message("Please specify a model path")
+            return
+        
+        success = self.object_detector.load_model(model_path)
+        
+        if success:
+            self.model_info_label.setText(
+                f"Model loaded with {len(self.object_detector.class_names)} classes"
+            )
+            # Enable auto targeting if system is calibrated
+            self.auto_targeting_btn.setEnabled(self.calibration.is_calibrated)
+            self.apply_detection_settings()
+        else:
+            self.model_info_label.setText("Failed to load model")
+
+    def update_confidence_threshold(self, value):
+        """Update confidence threshold when spin box value changes."""
+        self.object_detector.set_confidence_threshold(value)
+
+    def update_targeting_mode(self, mode):
+        """Update targeting mode when combo box value changes."""
+        self.object_detector.set_targeting_mode(mode)
+
+    def apply_detection_settings(self):
+        """Apply detection settings from UI controls."""
+        # Update confidence threshold
+        threshold = self.confidence_threshold_spin.value()
+        self.object_detector.set_confidence_threshold(threshold)
+        
+        # Update target classes
+        classes_text = self.target_classes_edit.text()
+        if classes_text:
+            classes = [c.strip() for c in classes_text.split(",")]
+            self.object_detector.set_target_classes(classes)
+        
+        # Update targeting mode
+        mode = self.targeting_mode_combo.currentText()
+        self.object_detector.set_targeting_mode(mode)
+        
+        self.log_message("Detection settings applied")
+
+    def toggle_auto_targeting(self):
+        """Toggle automatic targeting on/off."""
+        if self.auto_targeting_enabled:
+            # Stop automatic targeting
+            self.auto_targeting_enabled = False
+            self.auto_targeting_btn.setText("Start Automatic Targeting")
+            self.auto_targeting_btn.setStyleSheet("")  # Reset to default style
+            
+            # Stop targeting loop
+            self.targeting_loop_timer.stop()
+            
+            # Stop detection if running
+            if self.object_detector.is_detecting:
+                self.object_detector.stop_detection()
+            
+            # Turn off laser if it was on for targeting
+            if self.laser_on and self.auto_laser_checkbox.isChecked():
+                self.toggle_laser()
+            
+            self.log_message("Automatic targeting stopped")
+        else:
+            # Check if calibrated
+            if not self.calibration.is_calibrated:
+                self.log_message("Calibration required for automatic targeting")
+                QMessageBox.warning(self, "Not Calibrated", 
+                                  "Please calibrate the system before using automatic targeting")
+                return
+            
+            # Check if model is loaded
+            if self.object_detector.model is None:
+                self.log_message("Please load a YOLO model first")
+                QMessageBox.warning(self, "No Model", 
+                                  "Please load a YOLO model before using automatic targeting")
+                return
+            
+            # Start automatic targeting
+            self.auto_targeting_enabled = True
+            self.auto_targeting_btn.setText("Stop Automatic Targeting")
+            self.auto_targeting_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #f44336;
+                    color: white;
+                    border: none;
+                    border-radius: 5px;
+                }
+                QPushButton:hover {
+                    background-color: #da190b;
+                }
+                QPushButton:pressed {
+                    background-color: #b91400;
+                }
+            """)
+            
+            # Turn on laser if checked
+            if not self.laser_on and self.auto_laser_checkbox.isChecked():
+                self.toggle_laser()
+            
+            # Start detection if not already running
+            if not self.object_detector.is_detecting:
+                self.object_detector.start_detection(self.camera.get_frame)
+            
+            # Start targeting loop
+            self.targeting_loop_timer.start(100)  # 10 Hz targeting loop
+            
+            self.log_message("Automatic targeting started")
+
+    def targeting_loop(self):
+        """Main loop for automatic targeting."""
+        if not self.auto_targeting_enabled:
+            return
+        
+        # Get the best target
+        target = self.object_detector.get_target()
+        
+        if target is None:
+            return
+        
+        # Get target center point
+        center_x, center_y = target['center']
+        
+        # Use calibration to aim at target
+        self.calibration.aim_at_target(center_x, center_y)
+        
+        # Log targeting info occasionally
+        if time.time() % 2 < 0.1:  # Log roughly every 2 seconds
+            self.log_message(
+                f"Targeting {target['class_name']} at ({center_x}, {center_y}) "
+                f"with confidence {target['confidence']:.2f}"
+            )
+
+    def on_object_detected(self, detections, vis_frame):
+        """
+        Callback when objects are detected.
+        
+        Args:
+            detections: List of detected objects
+            vis_frame: Visualization frame with detection overlays
+        """
+        # Use this for additional visualization or feedback if needed
+        pass
     
     def update_status(self):
         """Update status information and check for automatic calibration completion."""
@@ -1400,6 +1704,13 @@ class SimplifiedTurretCalibrationApp(QMainWindow):
         # Stop automatic calibration if running
         if hasattr(self, 'auto_calibrator') and self.auto_calibrator.is_calibrating:
             self.auto_calibrator.stop_calibration()
+        
+        # Stop object detection if running
+        if hasattr(self, 'object_detector') and self.object_detector.is_detecting:
+            self.object_detector.stop_detection()
+
+        if hasattr(self, 'targeting_loop_timer'):
+            self.targeting_loop_timer.stop()
         
         # Stop the timers
         if hasattr(self, 'camera_timer'):
